@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; margin: 0; }
+    label { display: block; font-size: 11px; color: #555; margin-bottom: 4px; }
+    button { width: 100%; margin-bottom: 8px; padding: 8px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #tabInfo {
+      font-size: 12px; color: #555; margin-bottom: 10px;
+      word-break: break-all; white-space: pre-line;
+    }
+    #tabInfo.warn { color: #b45309; }
+    #taskInput {
+      width: 100%; box-sizing: border-box; margin-bottom: 8px;
+      padding: 6px 8px; font-size: 12px; border: 1px solid #d4d4d8;
+      border-radius: 6px; resize: vertical; min-height: 56px;
+    }
+    #status { font-size: 12px; margin-top: 8px; }
+    #results {
+      font-size: 11px; margin-top: 8px; padding: 8px;
+      background: #f4f4f5; border-radius: 6px; max-height: 160px;
+      overflow: auto; word-break: break-word; white-space: pre-wrap;
+    }
+    .hint { font-size: 10px; color: #71717a; margin-bottom: 8px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div id="tabInfo">Checking current tab…</div>
+  <label for="taskInput">Task</label>
+  <textarea
+    id="taskInput"
+    placeholder="Examples (any website):&#10;• Click the Sign in button&#10;• Search for running shoes&#10;• Open the first article&#10;• Close the cookie popup&#10;• Scroll down and click Contact Us&#10;• Fill form: name Ali, email ali@test.com"
+  ></textarea>
+  <p class="hint">Works on any site — click, search, navigate, scroll, type, and more.</p>
+  <button id="captureBtn">▶ Run task</button>
+  <div id="status"></div>
+  <div id="results" hidden></div>
+  <script src="popup.js"></script>
+</body>
+</html>
