@@ -6,11 +6,23 @@ const ACTION_DELAY_MS = 400;
 const BACKEND_URL = "http://localhost:5000";
 const OMNIPARSER_URL =
   "https://zenot.shop/parse?box_threshold=0.05&iou_threshold=0.1&use_paddleocr=true&imgsz=640&return_image=true";
+const FETCH_TIMEOUT_MS = 30000;
 
 let captureInProgress = false;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ─── Status broadcasting ───────────────────────────────────────────────────
@@ -22,8 +34,7 @@ const BADGE_COLORS = {
   deciding  : "#6366f1",
   executing : "#f59e0b",
   done      : "#22c55e",
-  error     : "#ef4444",
-  saved     : "#6366f1"
+  error     : "#ef4444"
 };
 
 function setBadge(phase, shortText) {
@@ -83,7 +94,7 @@ async function sendToOmniParser(dataUrl) {
   const formData = new FormData();
   formData.append("image", blob, "screenshot.png");
 
-  const response = await fetch(OMNIPARSER_URL, { method: "POST", body: formData });
+  const response = await fetchWithTimeout(OMNIPARSER_URL, { method: "POST", body: formData });
   if (!response.ok) throw new Error(`OmniParser server returned ${response.status}`);
   return response.json();
 }
@@ -155,26 +166,18 @@ function buildElementList(elements, coordinates, imageWidth, imageHeight) {
 
 async function askClaudeForActions(elementList, userTask) {
   if (!elementList.length) {
-    console.warn("No elements to send to backend.");
     return null;
   }
-  try {
-    const response = await fetch(`${BACKEND_URL}/decide-action`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ elements: elementList, task: userTask })
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Backend returned ${response.status}: ${detail}`);
-    }
-    const decision = await response.json();
-    console.log("Claude plan:", decision);
-    return decision;
-  } catch (err) {
-    console.error("Backend call failed:", err);
-    return null;
+  const response = await fetchWithTimeout(`${BACKEND_URL}/decide-action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ elements: elementList, task: userTask })
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Backend returned ${response.status}: ${detail}`);
   }
+  return response.json();
 }
 
 // ─── Action label (for status messages) ──────────────────────────────────
@@ -194,142 +197,159 @@ function formatActionLabel(action) {
 // No debugger, no CDP — pure DOM + synthetic events.
 
 async function scriptClick(tabId, x, y) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (cx, cy) => {
-      const el = document.elementFromPoint(cx, cy);
-      if (!el) return;
-      el.focus?.();
-      ["mousedown", "mouseup", "click"].forEach((type) => {
-        el.dispatchEvent(new MouseEvent(type, {
-          bubbles: true, cancelable: true, view: window,
-          clientX: cx, clientY: cy
-        }));
-      });
-    },
-    args: [x, y]
-  });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (cx, cy) => {
+        const el = document.elementFromPoint(cx, cy);
+        if (!el) return;
+        el.focus?.();
+        ["mousedown", "mouseup", "click"].forEach((type) => {
+          el.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, view: window,
+            clientX: cx, clientY: cy
+          }));
+        });
+      },
+      args: [x, y]
+    });
+  } catch (err) {
+    console.error("scriptClick failed:", err);
+  }
 }
 
 async function scriptType(tabId, x, y, text) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (cx, cy, value) => {
-      // 1. Focus the element at these coordinates
-      const el = document.elementFromPoint(cx, cy);
-      if (!el) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (cx, cy, value) => {
+        const el = document.elementFromPoint(cx, cy);
+        if (!el) return;
 
-      ["mousedown", "mouseup", "click"].forEach((type) => {
-        el.dispatchEvent(new MouseEvent(type, {
-          bubbles: true, cancelable: true, view: window,
-          clientX: cx, clientY: cy
-        }));
-      });
+        ["mousedown", "mouseup", "click"].forEach((type) => {
+          el.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, cancelable: true, view: window,
+            clientX: cx, clientY: cy
+          }));
+        });
 
-      el.focus?.();
-
-      // 2. Clear existing value
-      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
-        // Use native value setter so React/Vue onChange fires properly
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          el.tagName === "INPUT" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
-          "value"
-        )?.set;
-        if (nativeSetter) nativeSetter.call(el, "");
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      } else if (el.isContentEditable) {
-        el.textContent = "";
-      }
-
-      // 3. Type character by character using InputEvent (works with React/Vue/Angular)
-      for (const char of value) {
-        el.dispatchEvent(new KeyboardEvent("keydown",  { key: char, bubbles: true }));
-        el.dispatchEvent(new KeyboardEvent("keypress", { key: char, bubbles: true }));
+        el.focus?.();
 
         if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
           const nativeSetter = Object.getOwnPropertyDescriptor(
             el.tagName === "INPUT" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
             "value"
           )?.set;
-          if (nativeSetter) nativeSetter.call(el, el.value + char);
+          if (nativeSetter) nativeSetter.call(el, "");
           el.dispatchEvent(new Event("input", { bubbles: true }));
         } else if (el.isContentEditable) {
-          el.textContent += char;
-          el.dispatchEvent(new InputEvent("input", { bubbles: true, data: char }));
+          el.textContent = "";
         }
 
-        el.dispatchEvent(new KeyboardEvent("keyup", { key: char, bubbles: true }));
-      }
+        for (const char of value) {
+          el.dispatchEvent(new KeyboardEvent("keydown",  { key: char, bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent("keypress", { key: char, bubbles: true }));
 
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    },
-    args: [x, y, String(text ?? "")]
-  });
+          if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+              el.tagName === "INPUT" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
+              "value"
+            )?.set;
+            if (nativeSetter) nativeSetter.call(el, el.value + char);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          } else if (el.isContentEditable) {
+            el.textContent += char;
+            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: char }));
+          }
+
+          el.dispatchEvent(new KeyboardEvent("keyup", { key: char, bubbles: true }));
+        }
+
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      args: [x, y, String(text ?? "")]
+    });
+  } catch (err) {
+    console.error("scriptType failed:", err);
+  }
 }
 
 async function scriptScroll(tabId, direction = "down", amount = 400) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (dir, amt) => {
-      window.scrollBy({ top: dir === "up" ? -amt : amt, behavior: "smooth" });
-    },
-    args: [direction, amount]
-  });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (dir, amt) => {
+        window.scrollBy({ top: dir === "up" ? -amt : amt, behavior: "smooth" });
+      },
+      args: [direction, amount]
+    });
+  } catch (err) {
+    console.error("scriptScroll failed:", err);
+  }
 }
 
 async function scriptPressKey(tabId, key) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (k) => {
-      const el = document.activeElement || document.body;
-      ["keydown", "keyup"].forEach((type) => {
-        el.dispatchEvent(new KeyboardEvent(type, { key: k, bubbles: true, cancelable: true }));
-      });
-      // Special: submit nearest form on Enter
-      if (k === "Enter") {
-        const form = el.closest?.("form");
-        if (form) form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      }
-    },
-    args: [key]
-  });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (k) => {
+        const el = document.activeElement || document.body;
+        ["keydown", "keyup"].forEach((type) => {
+          el.dispatchEvent(new KeyboardEvent(type, { key: k, bubbles: true, cancelable: true }));
+        });
+        if (k === "Enter") {
+          const form = el.closest?.("form");
+          if (form) form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        }
+      },
+      args: [key]
+    });
+  } catch (err) {
+    console.error("scriptPressKey failed:", err);
+  }
 }
 
 // ─── Action runner ────────────────────────────────────────────────────────
 
 async function runActions(tabId, actions) {
+  let completed = 0;
   for (let i = 0; i < actions.length; i++) {
     const action = actions[i];
     broadcastStatus("executing", `Step ${i + 1}/${actions.length}: ${formatActionLabel(action)}`);
 
-    switch (action.action) {
-      case "click":
-        if (action.x == null || action.y == null)
-          throw new Error(`Click action missing coordinates (step ${i + 1})`);
-        await scriptClick(tabId, action.x, action.y);
-        break;
+    try {
+      switch (action.action) {
+        case "click":
+          if (action.x == null || action.y == null)
+            throw new Error(`Click action missing coordinates (step ${i + 1})`);
+          await scriptClick(tabId, action.x, action.y);
+          break;
 
-      case "type":
-        if (action.x == null || action.y == null)
-          throw new Error(`Type action missing coordinates (step ${i + 1})`);
-        await scriptType(tabId, action.x, action.y, action.text ?? "");
-        break;
+        case "type":
+          if (action.x == null || action.y == null)
+            throw new Error(`Type action missing coordinates (step ${i + 1})`);
+          await scriptType(tabId, action.x, action.y, action.text ?? "");
+          break;
 
-      case "scroll":
-        await scriptScroll(tabId, action.direction ?? "down", action.amount ?? 400);
-        break;
+        case "scroll":
+          await scriptScroll(tabId, action.direction ?? "down", action.amount ?? 400);
+          break;
 
-      case "press_key":
-        await scriptPressKey(tabId, action.key || "Enter");
-        break;
+        case "press_key":
+          await scriptPressKey(tabId, action.key || "Enter");
+          break;
 
-      default:
-        console.warn("Unknown action skipped:", action);
+        default:
+          console.warn("Unknown action skipped:", action);
+      }
+      completed++;
+    } catch (err) {
+      console.error(`Action ${i + 1} failed:`, err);
     }
 
     await sleep(ACTION_DELAY_MS);
-    console.log("Executed:", formatActionLabel(action));
   }
+  return completed;
 }
 
 // ─── Main pipeline ────────────────────────────────────────────────────────
@@ -350,37 +370,41 @@ async function captureAndAct(tabId, userTask = "Click the most relevant button")
     const parsedData = await sendToOmniParser(dataUrl);
     const summary = summarizeParseResult(parsedData);
     let decision = null;
+    let doneMessage = "Done ✅";
 
     if (parsedData) {
       const elements = parsedData.elements ?? parsedData.parsed_content_list;
       const coordinates = parsedData.coordinates ?? parsedData.label_coordinates;
 
-      // Use actual tab dimensions for coordinate scaling
-      const [{ result: dims }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => ({ w: window.innerWidth, h: window.innerHeight })
-      });
+      let dims = { w: 1280, h: 800 };
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => ({ w: window.innerWidth, h: window.innerHeight })
+        });
+        if (results?.[0]?.result) dims = results[0].result;
+      } catch (_) {}
 
-      const imageWidth  = dims?.w || 1280;
-      const imageHeight = dims?.h || 800;
+      const imageWidth  = dims.w;
+      const imageHeight = dims.h;
       const elementList = buildElementList(elements, coordinates, imageWidth, imageHeight);
 
-      // 4. Claude
       broadcastStatus("deciding", "Asking Claude for an action plan…");
-      console.log("Sending elements to backend:", elementList);
       decision = await askClaudeForActions(elementList, userTask);
 
-      // 5. Execute
       if (decision?.actions?.length) {
         broadcastStatus("executing", `Running ${decision.actions.length} action(s)…`);
-        await runActions(tabId, decision.actions);
+        const completed = await runActions(tabId, decision.actions);
+        const completedMessage = completed < decision.actions.length
+          ? ` (${completed}/${decision.actions.length} completed)`
+          : "";
+        doneMessage = `Done ✅${completedMessage}`;
+      } else {
+        doneMessage = decision === null ? "Task failed — no response from backend" : "Done ✅";
       }
+    } else {
+      doneMessage = "Done ✅";
     }
-
-    const actionCount = decision?.actions?.length ?? 0;
-    const doneMessage = actionCount > 0
-      ? `Done ✅ — ${actionCount} action(s): ${decision.summary || "task completed"}`
-      : "Done ✅";
 
     broadcastStatus("done", doneMessage, { summary, raw: parsedData, decision });
 

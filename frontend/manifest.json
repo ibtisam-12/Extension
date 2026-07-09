@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "AI Page Agent",
   "version": "1.3",
+  "minimum_chrome_version": "102",
   "description": "Capture page, parse UI with OmniParser, plan actions with Claude, and execute click/type/scroll tasks.",
   "permissions": ["activeTab", "tabs", "scripting", "storage"],
   "host_permissions": ["https://zenot.shop/*", "http://localhost:5000/*"],

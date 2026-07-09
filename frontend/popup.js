@@ -57,25 +57,30 @@ async function refreshTabInfo() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const info = describeTab(tab?.url);
   tabInfoDiv.textContent = info.text;
-  tabInfoDiv.className   = info.warn ? "warn" : "";
+  tabInfoDiv.classList.toggle("warn", info.warn);
   captureBtn.disabled    = tab?.url ? isCaptureRestricted(tab.url) : false;
   return tab;
 }
 
 async function initPopup() {
-  await refreshTabInfo();
+  try {
+    await refreshTabInfo();
+    const { lastCaptureStatus, captureInProgress: inProgress } =
+      await chrome.storage.session.get(["lastCaptureStatus", "captureInProgress"]);
 
-  // Restore last known status from session (task may have run while popup was closed)
-  const { lastCaptureStatus, captureInProgress: inProgress } =
-    await chrome.storage.session.get(["lastCaptureStatus", "captureInProgress"]);
-
-  if (inProgress) {
-    captureBtn.disabled = true;
-    statusDiv.textContent = lastCaptureStatus?.message || "Task in progress…";
-  } else {
-    applyStatus(lastCaptureStatus);
+    if (inProgress) {
+      captureBtn.disabled = true;
+      statusDiv.textContent = lastCaptureStatus?.message || "Task in progress…";
+    } else {
+      applyStatus(lastCaptureStatus);
+    }
+  } catch (err) {
+    statusDiv.textContent = "Error initializing popup";
+    console.error("initPopup failed:", err);
   }
 }
+
+initPopup().catch(err => console.error("initPopup unhandled:", err));
 
 // Listen for live updates if popup happens to be open during a task
 chrome.runtime.onMessage.addListener((msg) => {
