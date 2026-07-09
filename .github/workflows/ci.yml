@@ -11,16 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       - name: Validate manifest.json
-        run: python -c "import json; json.load(open('frontend/manifest.json')); print('manifest.json is valid JSON')"
+        run: python -c "import json; json.load(open('frontend/manifest.json')); print('OK')"
       - name: Check popup.html
-        run: python -c "
-import html.parser;
-class Check(html.parser.HTMLParser): pass;
-with open('frontend/popup.html') as f:
-    Check().feed(f.read());
-    print('popup.html is valid HTML')
-"
+        run: python -c "import html.parser; type('', (html.parser.HTMLParser,), {})().feed(open('frontend/popup.html').read()); print('OK')"
